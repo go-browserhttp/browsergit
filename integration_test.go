@@ -45,6 +45,17 @@ func TestFullCycle(t *testing.T) {
 		t.Fatalf("read main.tex = %q, %v", b, err)
 	}
 
+	// List enumerates the working tree's regular files, sorted, with the .git
+	// control directory pruned (so no plumbing paths leak into the UI's file
+	// list).
+	files, err := repo.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(files) != 2 || files[0] != "README.md" || files[1] != "main.tex" {
+		t.Fatalf("List = %v, want [README.md main.tex] with .git pruned", files)
+	}
+
 	// Fresh clone is clean.
 	st, err := repo.Status()
 	if err != nil {

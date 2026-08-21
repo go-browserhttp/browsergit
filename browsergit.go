@@ -36,6 +36,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -205,6 +206,33 @@ func (r *Repo) WriteFile(p string, data []byte) error {
 		return fmt.Errorf("browsergit: write %s: %w", p, err)
 	}
 	return nil
+}
+
+// List walks the in-memory working tree and returns every regular file's
+// slash-relative path, sorted, with the .git control directory pruned. The
+// UI uses it to enumerate a freshly cloned repo (e.g. to find the .tex files
+// to open); it never touches a host filesystem, since the working tree is a
+// memfs.
+func (r *Repo) List() ([]string, error) {
+	var out []string
+	err := billyutil.Walk(r.fs, "/", func(p string, info fs.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if info.Name() == ".git" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		out = append(out, cleanPath(p))
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("browsergit: list: %w", err)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // Change is one dirty entry in the working tree.

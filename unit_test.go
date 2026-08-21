@@ -13,12 +13,59 @@ package browsergit
 import (
 	"errors"
 	"fmt"
+	"os"
 	"testing"
 
+	billy "github.com/go-git/go-billy/v5"
+	"github.com/go-git/go-billy/v5/memfs"
+	billyutil "github.com/go-git/go-billy/v5/util"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 )
+
+// lstatErrFS is a working-tree filesystem whose root cannot be stat'd, so a
+// Walk fails at the first step — the error path List must wrap.
+type lstatErrFS struct{ billy.Filesystem }
+
+func (lstatErrFS) Lstat(string) (os.FileInfo, error) { return nil, errors.New("lstat boom") }
+
+func TestListWalkErrorIsWrapped(t *testing.T) {
+	r := &Repo{fs: lstatErrFS{memfs.New()}}
+	files, err := r.List()
+	if files != nil || err == nil {
+		t.Fatalf("List over an unwalkable tree = %v, %v; want nil, error", files, err)
+	}
+	if err.Error() == "" {
+		t.Fatal("expected a non-empty wrapped error")
+	}
+}
+
+func TestListPrunesGitAndSorts(t *testing.T) {
+	// A working tree whose memfs also carries a .git control directory (a
+	// non-memory storer would leave one there): List must prune it and return
+	// only the regular files, sorted.
+	fs := memfs.New()
+	for _, p := range []string{"main.tex", "chapters/intro.tex", "README.md", ".git/config", ".git/HEAD"} {
+		if err := billyutil.WriteFile(fs, p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := &Repo{fs: fs}
+	files, err := r.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	want := []string{"README.md", "chapters/intro.tex", "main.tex"}
+	if len(files) != len(want) {
+		t.Fatalf("List = %v, want %v (.git pruned)", files, want)
+	}
+	for i := range want {
+		if files[i] != want[i] {
+			t.Fatalf("List = %v, want %v", files, want)
+		}
+	}
+}
 
 func TestRepoURL(t *testing.T) {
 	cases := []struct {
