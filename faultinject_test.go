@@ -110,6 +110,53 @@ func TestCommitStoreFault(t *testing.T) {
 	}
 }
 
+func TestStageStagesUntracked(t *testing.T) {
+	// A healthy repo (storer NOT armed) with one untracked file: Stage must
+	// stage it (git add) so Status reports it as "staged", not "untracked".
+	r, _ := objFaultRepo(t, plumbing.BlobObject)
+	if err := r.Stage(); err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	st, err := r.Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	found := false
+	for _, c := range st.Changes {
+		if c.Path == "f.txt" {
+			found = true
+			if c.Status != "staged" {
+				t.Fatalf("f.txt status after Stage = %q, want staged", c.Status)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("Stage did not stage f.txt (changes = %+v)", st.Changes)
+	}
+}
+
+func TestStageWorktreeError(t *testing.T) {
+	// git.Init with a nil worktree yields a bare repo whose Worktree() errors,
+	// exercising Stage's worktree-error branch.
+	bare, err := git.Init(memory.NewStorage(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &Repo{client: New(Options{}), repo: bare, branch: "main"}
+	if err := r.Stage(); err == nil {
+		t.Fatal("Stage on a bare repo should error")
+	}
+}
+
+func TestStageAddFault(t *testing.T) {
+	// Staging fails because the blob object cannot be written.
+	r, st := objFaultRepo(t, plumbing.BlobObject)
+	st.armed = true
+	if err := r.Stage(); err == nil {
+		t.Fatal("Stage should fail when the blob cannot be staged")
+	}
+}
+
 func TestLogAndCountSinceResolveFault(t *testing.T) {
 	// HEAD resolves to a branch ref whose commit object is absent, so
 	// repo.Head() succeeds but repo.Log(From: hash) fails to resolve.

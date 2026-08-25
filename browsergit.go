@@ -383,6 +383,22 @@ func (r *Repo) Commit(message string) (string, error) {
 	return h.String(), nil
 }
 
+// Stage stages every tracked + untracked change (git add -A) WITHOUT committing,
+// so a following Status reports the staged entries. It is the "git add" half of
+// Commit, split out so the UI can offer a distinct Stage action; a clean tree is
+// a no-op (returns nil). AddWithOptions{All:true} on an unchanged tree does
+// nothing and never errors.
+func (r *Repo) Stage() error {
+	wt, err := r.repo.Worktree()
+	if err != nil {
+		return fmt.Errorf("browsergit: worktree: %w", err)
+	}
+	if err := wt.AddWithOptions(&git.AddOptions{All: true}); err != nil {
+		return fmt.Errorf("browsergit: add: %w", err)
+	}
+	return nil
+}
+
 // signature returns the commit identity, defaulting sensibly when the
 // options omit one so go-git never rejects the commit for a missing
 // author.
