@@ -27,6 +27,7 @@ const (
 	OpWriteFile = "writeFile" // write one working-tree file (no commit)
 	OpStatus    = "status"    // branch + ahead/behind + dirty snapshot
 	OpCommit    = "commit"    // write a file then commit it
+	OpStage     = "stage"     // write a file then stage it (git add, no commit)
 	OpPull      = "pull"      // fast-forward against origin, refresh contents
 	OpPush      = "push"      // push the tracked branch to origin
 	OpLog       = "log"       // recent commits, newest first
@@ -66,14 +67,26 @@ type Request struct {
 	Args Args   `json:"args,omitempty"`
 }
 
+// Change is one dirty working-tree entry: its slash-relative Path and a single
+// UI status label ("untracked" | "modified" | "deleted" | "staged"), exactly
+// browsergit's classify() vocabulary. The sidebar's per-file badge column reads
+// these; a clean tree carries none.
+type Change struct {
+	Path   string `json:"path"`
+	Status string `json:"status"`
+}
+
 // Status is the branch/divergence snapshot a mutating op returns so the main app
-// never needs a separate round-trip to render the panel's status line.
+// never needs a separate round-trip to render the panel's status line. Changes
+// is the per-file dirty list the workspace sidebar badges each row from;
+// DirtyFile is kept as the len(Changes) count the compact status line shows.
 type Status struct {
-	Branch    string `json:"branch"`
-	Ahead     int    `json:"ahead"`
-	Behind    int    `json:"behind"`
-	Clean     bool   `json:"clean"`
-	DirtyFile int    `json:"dirtyFile"`
+	Branch    string   `json:"branch"`
+	Ahead     int      `json:"ahead"`
+	Behind    int      `json:"behind"`
+	Clean     bool     `json:"clean"`
+	DirtyFile int      `json:"dirtyFile"`
+	Changes   []Change `json:"changes,omitempty"`
 }
 
 // Commit is one log line: the abbreviated hash, subject and author.
