@@ -22,6 +22,7 @@ import "encoding/json"
 // long-lived session it holds across calls.
 const (
 	OpClone     = "clone"     // clone a remote into the worker's memory
+	OpRestore   = "restore"   // reopen a repository saved by an earlier visit
 	OpList      = "list"      // list the working-tree file paths
 	OpReadFile  = "readFile"  // read one working-tree file
 	OpWriteFile = "writeFile" // write one working-tree file (no commit)
@@ -110,8 +111,12 @@ type Reply struct {
 	Contents map[string]string `json:"contents,omitempty"`
 	Content  string            `json:"content,omitempty"`
 	HasRepo  bool              `json:"hasRepo,omitempty"`
-	Status   *Status           `json:"status,omitempty"`
-	Log      []Commit          `json:"log,omitempty"`
+	// Restored answers [OpRestore] alone: whether a saved repository was found
+	// and reopened. A false Restored with OK true is not a failure — it means
+	// this browser has never held this repository, and the caller should clone.
+	Restored bool     `json:"restored,omitempty"`
+	Status   *Status  `json:"status,omitempty"`
+	Log      []Commit `json:"log,omitempty"`
 }
 
 // EncodeRequest renders req to its JSON wire string. The Request shape is always
