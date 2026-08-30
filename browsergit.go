@@ -31,9 +31,12 @@
 package browsergit
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"path"
 	"sort"
@@ -46,11 +49,16 @@ import (
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
-	"github.com/go-git/go-git/v5/storage/memory"
+	"github.com/go-git/go-git/v5/storage/filesystem"
 )
+
+// gitDir is the control directory inside the working tree, the one place a
+// snapshot must carry along with the files and the one [Repo.List] prunes.
+const gitDir = ".git"
 
 // RemoteName is the single remote every clone wires up, matching loom.
 const RemoteName = "origin"
@@ -101,6 +109,10 @@ type Options struct {
 // Client is a stateless factory bound to one origin + identity. It holds
 // no mutable state, so a single Client can mint many Repos.
 type Client struct {
+	// newRoot builds the filesystem a clone lives in. nil means a fresh memfs;
+	// only a test sets it, to drive the preparation guard below.
+	newRoot func() billy.Filesystem
+
 	opts Options
 }
 
@@ -166,8 +178,10 @@ func (c *Client) Clone(ctx context.Context, repoPath, branch string, depth int) 
 	if depth <= 0 {
 		depth = 1
 	}
-	storer := memory.NewStorage()
-	wtfs := memfs.New()
+	wtfs, storer, err := newTree(c.root())
+	if err != nil {
+		return nil, fmt.Errorf("browsergit: prepare tree: %w", err)
+	}
 
 	repo, err := git.CloneContext(ctx, storer, wtfs, &git.CloneOptions{
 		URL:           c.repoURL(repoPath),
@@ -178,6 +192,136 @@ func (c *Client) Clone(ctx context.Context, repoPath, branch string, depth int) 
 	})
 	if err != nil {
 		return nil, classifyErr("clone", err)
+	}
+	return &Repo{client: c, repo: repo, fs: wtfs, branch: branch}, nil
+}
+
+// root is the filesystem a repository is built in.
+func (c *Client) root() billy.Filesystem {
+	if c.newRoot != nil {
+		return c.newRoot()
+	}
+	return memfs.New()
+}
+
+// newTree builds the single in-memory filesystem a repository lives in: the
+// working tree at its root and the control directory at .git inside it, the
+// same shape a repository has on disk.
+//
+// The object store used to be a detached memory.Storage, which made the
+// repository two unrelated values with no way to write one down. One tree can
+// be serialised whole — see [Repo.Snapshot] — so a browser tab can keep its
+// clone across a reload instead of re-fetching it every time. go-git's worktree
+// walker skips .git, and [Repo.List] prunes it as well, so nothing plumbing
+// leaks into the file list.
+func newTree(root billy.Filesystem) (billy.Filesystem, *filesystem.Storage, error) {
+	dot, err := root.Chroot(gitDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	return root, filesystem.NewStorage(dot, cache.NewObjectLRUDefault()), nil
+}
+
+// Snapshot serialises the whole repository — working tree and .git alike — as a
+// tar archive, for a caller that wants to store it and hand it back to [Client.Open]
+// later. Object files are already compressed by git, so the archive is not
+// compressed again.
+func (r *Repo) Snapshot() ([]byte, error) {
+	var buf bytes.Buffer
+	if err := r.snapshotTo(&buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// snapshotTo is Snapshot's body against any writer, so a test can supply one
+// that fails and reach the write guards a bytes.Buffer never trips.
+func (r *Repo) snapshotTo(w io.Writer) error {
+	tw := tar.NewWriter(w)
+	if err := snapshotDir(tw, r.fs, "."); err != nil {
+		return fmt.Errorf("browsergit: snapshot: %w", err)
+	}
+	if err := tw.Close(); err != nil {
+		return fmt.Errorf("browsergit: snapshot: %w", err)
+	}
+	return nil
+}
+
+// snapshotDir walks dir depth-first, writing every regular file it finds. Empty
+// directories carry no information git needs — every path it cares about holds
+// a file — so only files are recorded and Open recreates the parents.
+func snapshotDir(tw *tar.Writer, fs billy.Filesystem, dir string) error {
+	entries, err := fs.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		p := path.Join(dir, e.Name())
+		if e.IsDir() {
+			if err := snapshotDir(tw, fs, p); err != nil {
+				return err
+			}
+			continue
+		}
+		if !e.Mode().IsRegular() {
+			continue
+		}
+		data, err := billyutil.ReadFile(fs, p)
+		if err != nil {
+			return err
+		}
+		name := strings.TrimPrefix(path.Clean(p), "./")
+		if err := tw.WriteHeader(&tar.Header{
+			Name: name,
+			Mode: int64(e.Mode().Perm()),
+			Size: int64(len(data)),
+		}); err != nil {
+			return err
+		}
+		if _, err := tw.Write(data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Open restores a repository from a [Repo.Snapshot] archive and reopens it,
+// without contacting the remote. The branch is the one the snapshot was taken
+// on; the caller keeps that alongside the bytes.
+func (c *Client) Open(snap []byte, branch string) (*Repo, error) {
+	if branch == "" {
+		branch = DefaultBranch
+	}
+	return c.openInto(c.root(), snap, branch)
+}
+
+// openInto is Open's body against a caller-supplied root, so a test can hand it
+// a filesystem that refuses writes.
+func (c *Client) openInto(root billy.Filesystem, snap []byte, branch string) (*Repo, error) {
+	wtfs, storer, err := newTree(root)
+	if err != nil {
+		return nil, fmt.Errorf("browsergit: prepare tree: %w", err)
+	}
+	tr := tar.NewReader(bytes.NewReader(snap))
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("browsergit: restore: %w", err)
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			return nil, fmt.Errorf("browsergit: restore %s: %w", h.Name, err)
+		}
+		if err := billyutil.WriteFile(wtfs, h.Name, data, fs.FileMode(h.Mode)); err != nil {
+			return nil, fmt.Errorf("browsergit: restore %s: %w", h.Name, err)
+		}
+	}
+	repo, err := git.Open(storer, wtfs)
+	if err != nil {
+		return nil, classifyErr("open", err)
 	}
 	return &Repo{client: c, repo: repo, fs: wtfs, branch: branch}, nil
 }
@@ -220,7 +364,7 @@ func (r *Repo) List() ([]string, error) {
 			return err
 		}
 		if info.IsDir() {
-			if info.Name() == ".git" {
+			if info.Name() == gitDir {
 				return fs.SkipDir
 			}
 			return nil
