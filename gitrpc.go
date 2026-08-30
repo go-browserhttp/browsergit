@@ -23,6 +23,7 @@ import "encoding/json"
 const (
 	OpClone     = "clone"     // clone a remote into the worker's memory
 	OpRestore   = "restore"   // reopen a repository saved by an earlier visit
+	OpForget    = "forget"    // drop the saved copy, so the next visit clones afresh
 	OpList      = "list"      // list the working-tree file paths
 	OpReadFile  = "readFile"  // read one working-tree file
 	OpWriteFile = "writeFile" // write one working-tree file (no commit)
