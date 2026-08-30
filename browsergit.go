@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"path"
 	"sort"
 	"strings"
@@ -118,8 +119,46 @@ type Client struct {
 
 // New returns a Client for the given options. BaseURL is normalised once
 // (trailing slashes trimmed) so repoURL joins are clean.
+// SplitCredential moves a credential out of a remote URL and into the token,
+// returning the cleaned URL and the token to use.
+//
+// A credential belongs in the Authorization header, which is where [Client.auth]
+// puts the token — it is sent per request, held nowhere, and written nowhere. A
+// credential in the URL is a different thing entirely: go-git records the remote
+// URL in .git/config, so it lands in the repository itself and from there in
+// anything that stores the repository. That is not hypothetical — it is how a
+// pasted token reached the browser cache before this existed.
+//
+// An explicit token wins: it is what the reader typed into the token field. A
+// URL that carries only a username and no password is the token-as-username
+// form some forges use, so that username becomes the token when none was given.
+// Anything that does not parse as a URL is returned untouched — it is a path
+// fragment, not a URL, and there is nothing to strip.
+func SplitCredential(rawURL, token string) (string, string) {
+	if rawURL == "" {
+		return rawURL, token
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.User == nil {
+		return rawURL, token
+	}
+	if token == "" {
+		if pw, ok := u.User.Password(); ok && pw != "" {
+			token = pw
+		} else {
+			token = u.User.Username()
+		}
+	}
+	u.User = nil
+	return u.String(), token
+}
+
 func New(opts Options) *Client {
 	opts.BaseURL = strings.TrimRight(strings.TrimSpace(opts.BaseURL), "/")
+	// Done HERE, at the one door every caller comes through, so no code path can
+	// carry a credential into go-git's config and from there into a stored copy
+	// of the repository. See [SplitCredential].
+	opts.BaseURL, opts.Token = SplitCredential(opts.BaseURL, opts.Token)
 	return &Client{opts: opts}
 }
 
