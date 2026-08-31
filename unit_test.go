@@ -203,3 +203,55 @@ func TestClassifyErr(t *testing.T) {
 		})
 	}
 }
+
+// TestProgressWriterSplitsLines proves the sideband writer emits one line per
+// '\r'/'\n'-delimited segment, holds an unterminated tail across Writes, and
+// drops empty segments — so go-git's chunked progress ("Receiving objects…\r")
+// reaches the callback as clean, whole lines.
+func TestProgressWriterSplitsLines(t *testing.T) {
+	var got []string
+	w := &progressWriter{fn: func(line string) { got = append(got, line) }}
+
+	// A chunk carrying two complete updates plus a partial third.
+	if _, err := w.Write([]byte("Counting objects: 100% (42/42)\rReceiving objects:  10% (100/1000)\rReceiving objects:  4")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// The tail completes on the next chunk, then a final newline-terminated line.
+	if _, err := w.Write([]byte("5% (450/1000)\rResolving deltas: 100% (5/5), done.\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	want := []string{
+		"Counting objects: 100% (42/42)",
+		"Receiving objects:  10% (100/1000)",
+		"Receiving objects:  45% (450/1000)",
+		"Resolving deltas: 100% (5/5), done.",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("emitted %d lines %q, want %d", len(got), got, len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("line %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	// A nil callback makes the writer an inert sink that still consumes its input.
+	inert := &progressWriter{}
+	if n, err := inert.Write([]byte("ignored\r")); err != nil || n != 8 {
+		t.Fatalf("inert write = %d, %v", n, err)
+	}
+}
+
+// TestProgressSinkNilWithoutCallback confirms a client with no progress callback
+// hands go-git a nil sink, so no sideband demux is attached (and the option is
+// omitted exactly as before this feature).
+func TestProgressSinkNilWithoutCallback(t *testing.T) {
+	c := New(Options{})
+	if c.progressSink() != nil {
+		t.Fatal("a client with no progress callback must give go-git a nil sink")
+	}
+	c.SetProgress(func(string) {})
+	if c.progressSink() == nil {
+		t.Fatal("a client with a progress callback must give go-git a real sink")
+	}
+}

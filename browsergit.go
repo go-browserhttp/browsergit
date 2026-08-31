@@ -114,7 +114,58 @@ type Client struct {
 	// only a test sets it, to drive the preparation guard below.
 	newRoot func() billy.Filesystem
 
+	// progress, when set, receives the server's sideband progress lines during a
+	// Clone or Pull ("Counting objects…", "Receiving objects:  45% (450/1000)").
+	// It is best-effort UI plumbing: a server that sends no sideband, or a fast
+	// op, simply never calls it. Set once by the worker (SetProgress); nil in the
+	// common case, so no progress writer is attached and go-git behaves as before.
+	progress func(line string)
+
 	opts Options
+}
+
+// SetProgress installs a callback the client forwards the remote's sideband
+// progress lines to during the next Clone/Pull. Passing nil disables forwarding.
+// It is not safe to call concurrently with an in-flight op on the same client;
+// the worker sets it before driving one op at a time.
+func (c *Client) SetProgress(fn func(line string)) { c.progress = fn }
+
+// progressWriter is the io.Writer go-git's sideband is pointed at when a progress
+// callback is set. go-git writes the remote's progress text to it in chunks
+// delimited by '\r' (an in-place update) or '\n' (a phase end); this buffers the
+// bytes and emits each complete, non-empty segment to fn as one line, holding any
+// trailing partial back for the next Write. A nil fn makes it an inert sink.
+type progressWriter struct {
+	fn  func(line string)
+	buf []byte
+}
+
+func (w *progressWriter) Write(p []byte) (int, error) {
+	if w.fn == nil {
+		return len(p), nil
+	}
+	w.buf = append(w.buf, p...)
+	start := 0
+	for i := 0; i < len(w.buf); i++ {
+		if w.buf[i] == '\r' || w.buf[i] == '\n' {
+			if seg := strings.TrimSpace(string(w.buf[start:i])); seg != "" {
+				w.fn(seg)
+			}
+			start = i + 1
+		}
+	}
+	// Keep the unterminated tail for the next Write, dropping what was emitted.
+	w.buf = append(w.buf[:0], w.buf[start:]...)
+	return len(p), nil
+}
+
+// progressSink returns the io.Writer to hand go-git for this client, or nil when
+// no progress callback is set (so go-git attaches no sideband demux at all).
+func (c *Client) progressSink() io.Writer {
+	if c.progress == nil {
+		return nil
+	}
+	return &progressWriter{fn: c.progress}
 }
 
 // New returns a Client for the given options. BaseURL is normalised once
@@ -222,12 +273,17 @@ func (c *Client) Clone(ctx context.Context, repoPath, branch string, depth int) 
 		return nil, fmt.Errorf("browsergit: prepare tree: %w", err)
 	}
 
+	// Progress is a plain io.Writer (the server's sideband), NOT one of the
+	// transport-shaping fields the package doc forbids — it does not force a
+	// custom transport, so the request still rides the Fetch RoundTripper under
+	// js/wasm. nil when no callback is set, leaving go-git exactly as it was.
 	repo, err := git.CloneContext(ctx, storer, wtfs, &git.CloneOptions{
 		URL:           c.repoURL(repoPath),
 		Auth:          c.auth(),
 		Depth:         depth,
 		SingleBranch:  true,
 		ReferenceName: plumbing.NewBranchReferenceName(branch),
+		Progress:      c.progressSink(),
 	})
 	if err != nil {
 		return nil, classifyErr("clone", err)
@@ -610,6 +666,7 @@ func (r *Repo) Pull(ctx context.Context) error {
 		Auth:          r.client.auth(),
 		Depth:         1,
 		SingleBranch:  true,
+		Progress:      r.client.progressSink(),
 	})
 	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return classifyErr("pull", err)
