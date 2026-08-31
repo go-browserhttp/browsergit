@@ -16,7 +16,11 @@
 // pulls in go-git, so it is safe to depend on from the main app.
 package gitrpc
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strconv"
+	"strings"
+)
 
 // Op names. Each is one remote-git operation the worker can perform on the
 // long-lived session it holds across calls.
@@ -98,6 +102,68 @@ type Commit struct {
 	Author  string `json:"author"`
 }
 
+// Progress is one server-side sideband progress update, forwarded from the
+// worker to the main app DURING a long clone/pull (before the terminal [Reply]).
+// Line is the raw remote line ("Receiving objects:  45% (450/1000)"); Phase is
+// its label ("Receiving objects"); Fraction is the parsed [0,1] completion, or
+// -1 when the line carries no measurable ratio (so the UI slides an
+// indeterminate bar rather than claiming a dishonest 0%). See [ParseProgress].
+type Progress struct {
+	Phase    string  `json:"phase,omitempty"`
+	Line     string  `json:"line,omitempty"`
+	Fraction float64 `json:"fraction"`
+}
+
+// ParseProgress turns one raw git sideband progress line into a [Progress]. The
+// git server writes lines like "Counting objects: 100% (42/42), done." and
+// "Receiving objects:  45% (450/1000), 1.2 MiB | 500 KiB/s"; the label before
+// the first colon is the phase, and a "(cur/total)" group gives the truest
+// fraction (a plain "NN%" is the fallback). A line with neither reports
+// Fraction -1 — "cannot tell" — never a made-up 0%.
+func ParseProgress(line string) Progress {
+	line = strings.TrimSpace(line)
+	p := Progress{Line: line, Fraction: -1}
+	if line == "" {
+		return p
+	}
+	if i := strings.IndexByte(line, ':'); i > 0 {
+		p.Phase = strings.TrimSpace(line[:i])
+	}
+	// Prefer the exact (cur/total) count where the server sends one.
+	if open := strings.IndexByte(line, '('); open >= 0 {
+		if shut := strings.IndexByte(line[open:], ')'); shut > 0 {
+			inner := line[open+1 : open+shut]
+			if slash := strings.IndexByte(inner, '/'); slash > 0 {
+				cur, e1 := strconv.Atoi(strings.TrimSpace(inner[:slash]))
+				total, e2 := strconv.Atoi(strings.TrimSpace(inner[slash+1:]))
+				if e1 == nil && e2 == nil && total > 0 {
+					f := float64(cur) / float64(total)
+					if f > 1 {
+						f = 1
+					}
+					p.Fraction = f
+					return p
+				}
+			}
+		}
+	}
+	// Fall back to a bare "NN%" token.
+	if pct := strings.IndexByte(line, '%'); pct > 0 {
+		start := pct
+		for start > 0 && (line[start-1] == ' ' || line[start-1] >= '0' && line[start-1] <= '9') {
+			start--
+		}
+		if n, err := strconv.Atoi(strings.TrimSpace(line[start:pct])); err == nil && n >= 0 {
+			f := float64(n) / 100
+			if f > 1 {
+				f = 1
+			}
+			p.Fraction = f
+		}
+	}
+	return p
+}
+
 // Reply is the worker's answer to a [Request]. On success OK is true and the
 // op-specific fields are populated; on failure OK is false and Code (plus the
 // human Error detail) explain why. Ready is set only on the one-shot boot message
@@ -118,6 +184,12 @@ type Reply struct {
 	Restored bool     `json:"restored,omitempty"`
 	Status   *Status  `json:"status,omitempty"`
 	Log      []Commit `json:"log,omitempty"`
+	// Progress, when non-nil, makes this a NON-TERMINAL progress notification for
+	// the in-flight op ID rather than its result: the main app forwards it to the
+	// UI and keeps waiting for the real reply. It is absent (nil) on every terminal
+	// reply, so a main app that does not know the field simply never sees one — the
+	// field is backward-compatible in both directions.
+	Progress *Progress `json:"progress,omitempty"`
 }
 
 // EncodeRequest renders req to its JSON wire string. The Request shape is always
@@ -160,4 +232,12 @@ func OKReply(id int) Reply { return Reply{ID: id, OK: true} }
 // ErrorReply builds a failed reply for id with a stable code and detail.
 func ErrorReply(id int, code, detail string) Reply {
 	return Reply{ID: id, OK: false, Code: code, Error: detail}
+}
+
+// ProgressReply builds a NON-TERMINAL progress notification for the in-flight op
+// id. It is posted before the terminal reply; the main app routes it to the op's
+// progress callback by ID and keeps waiting for the result. OK is left false —
+// the Progress field, not OK, is what marks it non-terminal.
+func ProgressReply(id int, p Progress) Reply {
+	return Reply{ID: id, Progress: &p}
 }

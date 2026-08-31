@@ -63,3 +63,53 @@ func TestReplyConstructors(t *testing.T) {
 		t.Fatalf("ErrorReply = %+v", r)
 	}
 }
+
+// TestParseProgress covers the sideband-line parser: the phase is the text before
+// the colon, an exact "(cur/total)" gives the truest fraction, a bare "NN%" is the
+// fallback, and a line with neither reports -1 ("cannot tell") rather than 0%.
+func TestParseProgress(t *testing.T) {
+	for _, tc := range []struct {
+		line      string
+		wantPhase string
+		wantFrac  float64
+	}{
+		{"Receiving objects:  45% (450/1000), 1.2 MiB | 500 KiB/s", "Receiving objects", 0.45},
+		{"Counting objects: 100% (42/42), done.", "Counting objects", 1},
+		{"Compressing objects:  50% (10/20)", "Compressing objects", 0.5},
+		{"Resolving deltas:  25%", "Resolving deltas", 0.25},
+		{"Enumerating objects: 128, done.", "Enumerating objects", -1},
+		{"remote: Total 5 (delta 0)", "remote", -1},
+		{"", "", -1},
+		{"  (7/0) zero total", "", -1}, // a zero total is unusable, not a divide
+	} {
+		got := ParseProgress(tc.line)
+		if got.Phase != tc.wantPhase {
+			t.Errorf("ParseProgress(%q).Phase = %q, want %q", tc.line, got.Phase, tc.wantPhase)
+		}
+		if got.Fraction != tc.wantFrac {
+			t.Errorf("ParseProgress(%q).Fraction = %v, want %v", tc.line, got.Fraction, tc.wantFrac)
+		}
+	}
+}
+
+// TestProgressReplyRoundTrip proves a progress notification survives the wire and
+// is distinguishable from a terminal reply: its Progress field is non-nil (a
+// terminal reply's is nil) while OK stays false.
+func TestProgressReplyRoundTrip(t *testing.T) {
+	p := ParseProgress("Receiving objects:  90% (900/1000)")
+	got, err := DecodeReply(EncodeReply(ProgressReply(12, p)))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ID != 12 || got.Progress == nil {
+		t.Fatalf("progress reply lost its marker: %+v", got)
+	}
+	if got.Progress.Fraction != 0.9 || got.Progress.Phase != "Receiving objects" {
+		t.Fatalf("progress payload = %+v", *got.Progress)
+	}
+	// A terminal reply carries no Progress, so the main app never mistakes it for a
+	// non-terminal notification.
+	if term, _ := DecodeReply(EncodeReply(OKReply(12))); term.Progress != nil {
+		t.Fatalf("a terminal reply must have nil Progress, got %+v", term.Progress)
+	}
+}
