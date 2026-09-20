@@ -1,6 +1,11 @@
 // Copyright (c) the go-tex authors.
 // SPDX-License-Identifier: BSD-3-Clause
 
+// Constrained like testserver_test.go, whose seedBareRepo it uses: see the note
+// there on why an untagged file that calls a !js helper breaks the whole js/wasm
+// build of this test package.
+//go:build !js
+
 package browsergit
 
 import (

@@ -1,6 +1,12 @@
 // Copyright (c) the go-tex authors.
 // SPDX-License-Identifier: BSD-3-Clause
 
+// The helpers here run a real git server over the loopback, so they are native
+// only. Any test file that calls one must carry this same constraint: an
+// untagged file that does breaks the js/wasm build of the WHOLE test package,
+// which silently takes wasm_cycle_test.go -- the package's only js/wasm test --
+// with it. Found by `GOOS=js GOARCH=wasm go vet ./...`, which the CI lanes do
+// not run over test files.
 //go:build !js
 
 package browsergit
