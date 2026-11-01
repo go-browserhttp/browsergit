@@ -10,6 +10,7 @@ package browsergit
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -132,10 +133,25 @@ func TestNewStripsTheCredentialFromEveryClient(t *testing.T) {
 	if strings.Contains(c.repoURL(""), testCredential) {
 		t.Errorf("the client's remote URL still carries the credential: %q", c.repoURL(""))
 	}
-	if c.opts.Token != testCredential {
-		t.Errorf("token = %q, want the credential moved into it (and thus into the header)", c.opts.Token)
+	if c.token.Reveal() != testCredential {
+		t.Errorf("the credential was not moved into the token (and thus into the header)")
+	}
+	if c.opts.Token != "" {
+		t.Errorf("Options still carries the token after New")
 	}
 	if auth := c.auth(); auth == nil {
 		t.Fatal("no auth method was built, so the moved credential would never be sent")
+	}
+}
+
+func TestAPrintedClientCannotCarryTheToken(t *testing.T) {
+	c := New(Options{BaseURL: "https://forge.example", Token: testCredential})
+	for _, v := range []string{"%v", "%+v", "%#v"} {
+		if s := fmt.Sprintf(v, c); strings.Contains(s, testCredential) {
+			t.Errorf("fmt %s of a Client leaked the token: %s", v, s)
+		}
+		if s := fmt.Sprintf(v, c.auth()); strings.Contains(s, testCredential) {
+			t.Errorf("fmt %s of the auth method leaked the token: %s", v, s)
+		}
 	}
 }

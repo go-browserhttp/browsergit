@@ -13,7 +13,9 @@ package browsergit
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
+	"strings"
 	"testing"
 
 	billy "github.com/go-git/go-billy/v5"
@@ -102,18 +104,25 @@ func TestAuthUsernameAndAuth(t *testing.T) {
 	if gh.authUsername() != "git" {
 		t.Fatalf("github username = %q, want git", gh.authUsername())
 	}
-	ba, ok := gh.auth().(*githttp.BasicAuth)
+	ba, ok := gh.auth().(githttp.AuthMethod)
 	if !ok {
-		t.Fatalf("auth() type = %T, want *githttp.BasicAuth", gh.auth())
+		t.Fatalf("auth() type = %T, want a go-git http AuthMethod", gh.auth())
 	}
-	if ba.Username != "git" || ba.Password != "tok" {
-		t.Fatalf("basic auth = %q/%q, want git/tok", ba.Username, ba.Password)
+	req, _ := http.NewRequest(http.MethodGet, "https://forge.example/", nil)
+	ba.SetAuth(req)
+	if u, p, ok := req.BasicAuth(); !ok || u != "git" || p != "tok" {
+		t.Fatalf("basic auth = %q/%q, want git/tok", u, p)
 	}
+	if ba.Name() != "http-basic-auth" || strings.Contains(ba.String(), "tok") {
+		t.Fatalf("Name/String = %q/%q", ba.Name(), ba.String())
+	}
+	// A nil request is ignored, as go-git's own BasicAuth does.
+	ba.SetAuth(nil)
 }
 
 func TestSignatureDefaults(t *testing.T) {
 	n, e := New(Options{}).signature()
-	if n != "go-tex playground" || e != "playground@go-tex.local" {
+	if n != DefaultAuthor || e != DefaultEmail {
 		t.Fatalf("default signature = %q/%q", n, e)
 	}
 	n, e = New(Options{Author: " Ada ", Email: " ada@x "}).signature()

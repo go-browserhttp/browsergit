@@ -1,8 +1,9 @@
 // Copyright (c) the go-tex authors.
 // SPDX-License-Identifier: BSD-3-Clause
 
-// Package browsergit is an in-browser (Go/wasm) remote-git client for the
-// go-tex playground. It wraps github.com/go-git/go-git/v5 driven entirely
+// Package browsergit is an in-browser (Go/wasm) remote-git client shared by
+// the go-tex, go-slides and notebook playgrounds (it began in go-tex's
+// playground/internal/browsergit, whose history it keeps). It wraps github.com/go-git/go-git/v5 driven entirely
 // from memory: a memory object store plus a memfs working tree, talking
 // smart-HTTP to a CORS-enabled origin over the browser Fetch API.
 //
@@ -38,6 +39,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"net/url"
 	"path"
 	"sort"
@@ -55,6 +57,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/storage/filesystem"
+
+	"github.com/go-browserhttp/browsergit/secret"
 )
 
 // gitDir is the control directory inside the working tree, the one place a
@@ -66,6 +70,13 @@ const RemoteName = "origin"
 
 // DefaultBranch is used whenever the caller passes an empty branch.
 const DefaultBranch = "main"
+
+// DefaultAuthor and DefaultEmail sign a commit when Options leaves them empty.
+// The address is under .invalid (RFC 2606), so it can never reach anyone.
+const (
+	DefaultAuthor = "playground"
+	DefaultEmail  = "playground@users.invalid"
+)
 
 // Sentinel error classes. Every operation wraps its underlying go-git
 // failure in exactly one of these so the UI (later phase) can branch on
@@ -92,6 +103,10 @@ var (
 	// ErrNotExist is returned by ReadFile when the path is absent from
 	// the in-memory working tree.
 	ErrNotExist = errors.New("browsergit: file does not exist")
+
+	// ErrBranchExists is returned by PushNewBranch when the remote already has
+	// the branch: a proposal never writes to an existing branch.
+	ErrBranchExists = errors.New("browsergit: branch already exists on the remote")
 )
 
 // Options configures a Client. BaseURL is either a Forgejo base
@@ -121,7 +136,8 @@ type Client struct {
 	// common case, so no progress writer is attached and go-git behaves as before.
 	progress func(line string)
 
-	opts Options
+	opts  Options // Token is always empty here; see token
+	token secret.Token
 }
 
 // SetProgress installs a callback the client forwards the remote's sideband
@@ -210,7 +226,11 @@ func New(opts Options) *Client {
 	// carry a credential into go-git's config and from there into a stored copy
 	// of the repository. See [SplitCredential].
 	opts.BaseURL, opts.Token = SplitCredential(opts.BaseURL, opts.Token)
-	return &Client{opts: opts}
+	// The token leaves Options here: a Client printed with %+v, or Options kept
+	// by a caller, must not carry it. It lives only in a secret.Token.
+	tok := secret.New(opts.Token)
+	opts.Token = ""
+	return &Client{opts: opts, token: tok}
 }
 
 // authUsername is the BasicAuth username for the configured provider.
@@ -227,11 +247,35 @@ func (c *Client) authUsername() string {
 // auth builds the go-git AuthMethod, or nil when no token is set (an
 // anonymous clone of a public repo).
 func (c *Client) auth() transport.AuthMethod {
-	if c.opts.Token == "" {
+	if c.token.IsZero() {
 		return nil
 	}
-	return &githttp.BasicAuth{Username: c.authUsername(), Password: c.opts.Token}
+	return &tokenAuth{user: c.authUsername(), token: c.token}
 }
+
+// tokenAuth is HTTP Basic auth with the token as password. It replaces go-git's
+// *http.BasicAuth, whose Password is a plain exported string that %#v prints;
+// here the value stays in a secret.Token until the header is written.
+type tokenAuth struct {
+	user  string
+	token secret.Token
+}
+
+var _ githttp.AuthMethod = (*tokenAuth)(nil)
+
+// SetAuth implements go-git's http.AuthMethod.
+func (a *tokenAuth) SetAuth(r *http.Request) {
+	if r == nil {
+		return
+	}
+	r.SetBasicAuth(a.user, a.token.Reveal())
+}
+
+// Name implements transport.AuthMethod.
+func (a *tokenAuth) Name() string { return "http-basic-auth" }
+
+// String implements transport.AuthMethod.
+func (a *tokenAuth) String() string { return "http-basic-auth - " + a.user + ":" + secret.Redacted }
 
 // repoURL joins BaseURL and repoPath into the smart-HTTP endpoint URL.
 // repoPath is taken as-is apart from trimming surrounding slashes, so a
@@ -644,11 +688,11 @@ func (r *Repo) Stage() error {
 func (c *Client) signature() (name, email string) {
 	name = strings.TrimSpace(c.opts.Author)
 	if name == "" {
-		name = "go-tex playground"
+		name = DefaultAuthor
 	}
 	email = strings.TrimSpace(c.opts.Email)
 	if email == "" {
-		email = "playground@go-tex.local"
+		email = DefaultEmail
 	}
 	return name, email
 }
@@ -685,6 +729,108 @@ func (r *Repo) Push(ctx context.Context) error {
 		Auth:       r.client.auth(),
 	})
 	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+		return classifyErr("push", err)
+	}
+	return nil
+}
+
+// Head returns the full id of the commit HEAD points at.
+func (r *Repo) Head() (string, error) {
+	head, err := r.repo.Head()
+	if err != nil {
+		return "", fmt.Errorf("browsergit: head: %w", err)
+	}
+	return head.Hash().String(), nil
+}
+
+// Blobs maps every regular file of HEAD's tree to its blob id. Symbolic links
+// and submodules are left out, as [Repo.List] leaves them out of the tree walk.
+func (r *Repo) Blobs() (map[string]string, error) {
+	head, err := r.repo.Head()
+	if err != nil {
+		return nil, fmt.Errorf("browsergit: head: %w", err)
+	}
+	c, err := r.repo.CommitObject(head.Hash())
+	if err != nil {
+		return nil, fmt.Errorf("browsergit: commit: %w", err)
+	}
+	tree, err := c.Tree()
+	if err != nil {
+		return nil, fmt.Errorf("browsergit: tree: %w", err)
+	}
+	out := map[string]string{}
+	err = tree.Files().ForEach(func(f *object.File) error {
+		if f.Mode.IsRegular() {
+			out[f.Name] = f.Hash.String()
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("browsergit: tree walk: %w", err)
+	}
+	return out, nil
+}
+
+// RemoveFile deletes path from the working tree; a following Commit records the
+// deletion. A path already absent is not an error.
+func (r *Repo) RemoveFile(p string) error {
+	if err := r.fs.Remove(cleanPath(p)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("browsergit: remove %s: %w", p, err)
+	}
+	return nil
+}
+
+// RemoteHasBranch asks the remote whether refs/heads/<branch> exists.
+func (r *Repo) RemoteHasBranch(ctx context.Context, branch string) (bool, error) {
+	rem, err := r.repo.Remote(RemoteName)
+	if err != nil {
+		return false, fmt.Errorf("browsergit: remote: %w", err)
+	}
+	refs, err := rem.ListContext(ctx, &git.ListOptions{Auth: r.client.auth()})
+	if err != nil {
+		return false, classifyErr("ls-remote", err)
+	}
+	want := plumbing.NewBranchReferenceName(branch)
+	for _, ref := range refs {
+		if ref.Name() == want {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// PushNewBranch creates branch at HEAD and pushes it, without force. It refuses
+// the branch this repo tracks and any branch the remote already has, so it can
+// only ever create a ref, never move one. (Between the check and the push
+// another client could create the same name; the push is then a non-fast-
+// forward and is rejected, unless that client pointed it at an ancestor of our
+// commit, which no client of ours does.)
+func (r *Repo) PushNewBranch(ctx context.Context, branch string) error {
+	if branch == "" || branch == r.branch {
+		return fmt.Errorf("%w: %q", ErrBranchExists, branch)
+	}
+	exists, err := r.RemoteHasBranch(ctx, branch)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("%w: %q", ErrBranchExists, branch)
+	}
+	head, err := r.repo.Head()
+	if err != nil {
+		return fmt.Errorf("browsergit: head: %w", err)
+	}
+	name := plumbing.NewBranchReferenceName(branch)
+	if err := r.repo.Storer.SetReference(plumbing.NewHashReference(name, head.Hash())); err != nil {
+		return fmt.Errorf("browsergit: create branch: %w", err)
+	}
+	spec := config.RefSpec(string(name) + ":" + string(name))
+	err = r.repo.PushContext(ctx, &git.PushOptions{
+		RemoteName: RemoteName,
+		RefSpecs:   []config.RefSpec{spec},
+		Auth:       r.client.auth(),
+	})
+	if err != nil {
 		return classifyErr("push", err)
 	}
 	return nil
