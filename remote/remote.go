@@ -10,8 +10,9 @@
 // and the branch the work was loaded from, are refused outright.
 //
 // Two families implement [Remote]: package forge talks to the GitHub, GitLab and
-// Gitea/Forgejo REST APIs; [Git] speaks git smart HTTP through
+// Gitea/Forgejo REST APIs; package smarthttp speaks git smart HTTP through
 // [github.com/go-browserhttp/browsergit], for forges reachable only that way.
+// This package itself links neither go-git nor net/http.
 package remote
 
 import (
@@ -185,6 +186,11 @@ func CheckPath(p string) error {
 		}
 	}
 	return nil
+}
+
+// IsLoopback reports whether host names the local machine.
+func IsLoopback(host string) bool {
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 // CheckDir accepts "" (the root) or a path CheckPath accepts.

@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/url"
 
 	"github.com/go-browserhttp/browsergit/remote"
@@ -238,7 +237,7 @@ func (g *github) Propose(ctx context.Context, base remote.Base, files remote.Fil
 				SHA string `json:"sha"`
 			}
 			body := map[string]string{"content": base64.StdEncoding.EncodeToString(ch.Data), "encoding": "base64"}
-			if _, err := g.c.getJSON(ctx, request{op: "create blob", method: http.MethodPost, path: g.repoPath(base.Repo) + "/git/blobs", body: body}, &out); err != nil {
+			if _, err := g.c.getJSON(ctx, request{op: "create blob", method: methodPost, path: g.repoPath(base.Repo) + "/git/blobs", body: body}, &out); err != nil {
 				return remote.Result{}, err
 			}
 			if out.SHA != remote.BlobID(ch.Data) {
@@ -253,12 +252,12 @@ func (g *github) Propose(ctx context.Context, base remote.Base, files remote.Fil
 		SHA string `json:"sha"`
 	}
 	treeBody := map[string]any{"base_tree": baseTree, "tree": entries}
-	if _, err := g.c.getJSON(ctx, request{op: "create tree", method: http.MethodPost, path: g.repoPath(base.Repo) + "/git/trees", body: treeBody}, &tree); err != nil {
+	if _, err := g.c.getJSON(ctx, request{op: "create tree", method: methodPost, path: g.repoPath(base.Repo) + "/git/trees", body: treeBody}, &tree); err != nil {
 		return remote.Result{}, err
 	}
 	var commit ghCommit
 	commitBody := map[string]any{"message": remote.Message(p), "tree": tree.SHA, "parents": []string{base.Commit}}
-	if _, err := g.c.getJSON(ctx, request{op: "create commit", method: http.MethodPost, path: g.repoPath(base.Repo) + "/git/commits", body: commitBody}, &commit); err != nil {
+	if _, err := g.c.getJSON(ctx, request{op: "create commit", method: methodPost, path: g.repoPath(base.Repo) + "/git/commits", body: commitBody}, &commit); err != nil {
 		return remote.Result{}, err
 	}
 	if !remote.IsCommitID(commit.SHA) {
@@ -267,7 +266,7 @@ func (g *github) Propose(ctx context.Context, base remote.Base, files remote.Fil
 	// POST /git/refs creates; it has no force and cannot move an existing ref
 	// (that is PATCH /git/refs/{ref}, which this package never calls).
 	refBody := map[string]string{"ref": "refs/heads/" + p.Branch, "sha": commit.SHA}
-	if _, err := g.c.do(ctx, request{op: "create branch", method: http.MethodPost, path: g.repoPath(base.Repo) + "/git/refs", body: refBody}); err != nil {
+	if _, err := g.c.do(ctx, request{op: "create branch", method: methodPost, path: g.repoPath(base.Repo) + "/git/refs", body: refBody}); err != nil {
 		return remote.Result{}, err
 	}
 	res := remote.Result{Branch: p.Branch, Commit: commit.SHA}
@@ -275,7 +274,7 @@ func (g *github) Propose(ctx context.Context, base remote.Base, files remote.Fil
 		HTMLURL string `json:"html_url"`
 	}
 	prBody := map[string]any{"title": p.Title, "head": p.Branch, "base": base.Ref, "body": p.Body}
-	if _, err := g.c.getJSON(ctx, request{op: "create pull request", method: http.MethodPost, path: g.repoPath(base.Repo) + "/pulls", body: prBody}, &pr); err != nil {
+	if _, err := g.c.getJSON(ctx, request{op: "create pull request", method: methodPost, path: g.repoPath(base.Repo) + "/pulls", body: prBody}, &pr); err != nil {
 		return res, fmt.Errorf("branch %s was pushed but the pull request failed: %w", p.Branch, err)
 	}
 	if res.URL, err = g.c.checkWebURL(pr.HTMLURL); err != nil {

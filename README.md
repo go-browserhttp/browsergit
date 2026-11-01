@@ -21,7 +21,8 @@ theirs, head, _ := r.Refresh(ctx, base)                              // nil when
 
 | Package | What it is |
 |---|---|
-| `remote` | The `Remote` interface (`Load`, `Propose`, `Refresh`), `Base`, path/branch/repository validation, size limits, and `Git`, a `Remote` over git smart HTTP. |
+| `remote` | The `Remote` interface (`Load`, `Propose`, `Refresh`), `Base`, path/branch/repository validation, size limits. Links neither go-git nor net/http. |
+| `smarthttp` | `Git`, a `Remote` over git smart HTTP (go-git). A package of its own, so that a REST-only page does not carry go-git (about 13 MB of wasm). |
 | `forge` | `Remote` over the REST APIs of **GitHub**, **GitLab** and **Gitea/Forgejo**. |
 | `secret` | `Token`: a credential that prints as `[redacted]` and refuses every encoder. |
 | `browsergit` (root) | go-git v5 in memory (memfs), smart HTTP over the browser's Fetch: clone, status, commit, pull, push, snapshot. Moved here from go-tex's `playground/internal/browsergit`, history kept. |
@@ -33,9 +34,9 @@ theirs, head, _ := r.Refresh(ctx, base)                              // nil when
 |---|---|---|
 | GitHub | `forge.GitHub` (REST; api.github.com answers CORS for any origin) | Fine-grained PAT: Metadata read, Contents read/write, Pull requests write. |
 | GitLab | `forge.GitLab` (REST) | OAuth (PKCE) or PAT with `api` scope. |
-| Gitea / Forgejo | `forge.Gitea` (REST) when the instance allows CORS; otherwise `remote.Git` through a CORS proxy | Access token with `write:repository`. Forgejo OAuth tokens have no scopes. |
+| Gitea / Forgejo | `forge.Gitea` (REST) when the instance allows CORS; otherwise `smarthttp.Git` through a CORS proxy | Access token with `write:repository`. Forgejo OAuth tokens have no scopes. |
 
-`remote.Git` cannot open a pull request (smart HTTP has no such verb): it
+`smarthttp.Git` cannot open a pull request (smart HTTP has no such verb): it
 pushes the new branch and returns the forge's compare page.
 
 ## Security
