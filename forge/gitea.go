@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strconv"
 
@@ -246,7 +245,7 @@ func (g *gitea) Propose(ctx context.Context, base remote.Base, files remote.File
 			SHA string `json:"sha"`
 		} `json:"commit"`
 	}
-	if _, err := g.c.getJSON(ctx, request{op: "change files", method: http.MethodPost, path: g.repoPath(base.Repo) + "/contents", body: body}, &out); err != nil {
+	if _, err := g.c.getJSON(ctx, request{op: "change files", method: methodPost, path: g.repoPath(base.Repo) + "/contents", body: body}, &out); err != nil {
 		return remote.Result{}, err
 	}
 	if out.Commit == nil || !remote.IsCommitID(out.Commit.SHA) {
@@ -257,7 +256,7 @@ func (g *gitea) Propose(ctx context.Context, base remote.Base, files remote.File
 		HTMLURL string `json:"html_url"`
 	}
 	prBody := map[string]any{"head": p.Branch, "base": base.Ref, "title": p.Title, "body": p.Body}
-	if _, err := g.c.getJSON(ctx, request{op: "create pull request", method: http.MethodPost, path: g.repoPath(base.Repo) + "/pulls", body: prBody}, &pr); err != nil {
+	if _, err := g.c.getJSON(ctx, request{op: "create pull request", method: methodPost, path: g.repoPath(base.Repo) + "/pulls", body: prBody}, &pr); err != nil {
 		return res, fmt.Errorf("branch %s was pushed but the pull request failed: %w", p.Branch, err)
 	}
 	if res.URL, err = g.c.checkWebURL(pr.HTMLURL); err != nil {

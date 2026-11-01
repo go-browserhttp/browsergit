@@ -1,6 +1,9 @@
 // Copyright (c) the go-browserhttp authors.
 // SPDX-License-Identifier: BSD-3-Clause
 
+// Native only: these drive fake forges over the loopback with HTTPTransport.
+//go:build !(js && wasm)
+
 package forge
 
 import (
@@ -292,11 +295,31 @@ func TestConfig(t *testing.T) {
 	if c.web.String() != "https://codeberg.org" {
 		t.Fatalf("derived web = %v", c.web)
 	}
-	// The caller's client is copied, not modified.
+	// The caller's client is copied, not modified, and still never redirected.
 	hc := &http.Client{}
-	_, _ = newClient(Config{Kind: GitHub, API: "https://api.github.com", HTTP: hc})
-	if hc.CheckRedirect != nil {
-		t.Fatal("the caller's http.Client was modified")
+	_, err = HTTPTransport{Client: hc}.RoundTrip(context.Background(), &Request{Method: "GET", URL: "http://127.0.0.1:1/", Limit: 1})
+	if hc.CheckRedirect != nil || err == nil {
+		t.Fatalf("the caller's http.Client was modified, or a closed port answered: %v", err)
+	}
+	if statusText(404) != "Not Found" || statusText(302) != "Redirect" || statusText(503) != "Server Error" || statusText(299) != "HTTP error" {
+		t.Fatal("statusText")
+	}
+}
+
+// A Transport that does not bound the body is bounded by the client anyway.
+type unbounded struct{}
+
+func (unbounded) RoundTrip(context.Context, *Request) (*Response, error) {
+	return &Response{Status: 200, Header: map[string]string{}, Body: make([]byte, 100)}, nil
+}
+
+func TestABodyOverTheLimitIsRefusedWhateverTheTransport(t *testing.T) {
+	r, err := New(Config{Kind: GitHub, API: "https://api.github.com", Transport: unbounded{}, MaxResponseBytes: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.Load(context.Background(), "o/r", "main", ""); !errors.Is(err, remote.ErrTooLarge) {
+		t.Fatalf("got %v", err)
 	}
 }
 

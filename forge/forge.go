@@ -23,18 +23,14 @@
 package forge
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/go-browserhttp/browsergit/remote"
 	"github.com/go-browserhttp/browsergit/secret"
@@ -63,10 +59,10 @@ type Config struct {
 	// Token authenticates every request. Zero: anonymous (Load of a public
 	// repository only).
 	Token secret.Token
-	// HTTP is the client to use; nil means a client with a 60 s timeout. It is
-	// copied, never modified.
-	HTTP   *http.Client
-	Limits remote.Limits
+	// Transport sends the requests; nil means net/http natively (60 s timeout)
+	// and the Fetch API in the browser. Either refuses redirects.
+	Transport Transport
+	Limits    remote.Limits
 	// BranchPrefix, when set, is required of every proposal branch.
 	BranchPrefix string
 	// MaxResponseBytes bounds one JSON response (default 32 MiB).
@@ -98,7 +94,7 @@ type client struct {
 	api    *url.URL
 	web    *url.URL
 	token  secret.Token
-	http   *http.Client
+	tr     Transport
 	lim    remote.Limits
 	prefix string
 	maxRsp int64
@@ -118,16 +114,12 @@ func newClient(cfg Config) (*client, error) {
 	if err != nil {
 		return nil, err
 	}
-	hc := http.Client{Timeout: 60 * time.Second}
-	if cfg.HTTP != nil {
-		hc = *cfg.HTTP
+	tr := cfg.Transport
+	if tr == nil {
+		tr = defaultTransport()
 	}
-	// A redirect would carry the request, and with it the header, somewhere we
-	// did not choose. The response is handed back unfollowed and fails as a
-	// non-2xx status.
-	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	c := &client{
-		kind: cfg.Kind, api: api, web: web, token: cfg.Token, http: &hc,
+		kind: cfg.Kind, api: api, web: web, token: cfg.Token, tr: tr,
 		lim: cfg.Limits.OrDefault(), prefix: cfg.BranchPrefix,
 		maxRsp: cfg.MaxResponseBytes, par: cfg.Concurrency,
 	}
@@ -200,9 +192,16 @@ type request struct {
 // response is what do returns on success.
 type response struct {
 	status int
-	header http.Header
+	header map[string]string // names in lower case
 	body   []byte
 }
+
+func (r *response) get(name string) string { return r.header[strings.ToLower(name)] }
+
+const (
+	methodGet  = "GET"
+	methodPost = "POST"
+)
 
 func (c *client) do(ctx context.Context, rq request) (*response, error) {
 	u := *c.api
@@ -217,65 +216,55 @@ func (c *client) do(ctx context.Context, rq request) (*response, error) {
 	if rq.query != nil {
 		u.RawQuery = rq.query.Encode()
 	}
-	var body io.Reader
+	req := &Request{Method: rq.method, URL: u.String(), Header: map[string]string{}, Limit: rq.limit}
+	if req.Method == "" {
+		req.Method = methodGet
+	}
+	if req.Limit <= 0 {
+		req.Limit = c.maxRsp
+	}
 	if rq.body != nil {
 		b, err := json.Marshal(rq.body)
 		if err != nil {
 			return nil, fmt.Errorf("%w: encode %s: %v", remote.ErrBadResponse, rq.op, err)
 		}
-		body = bytes.NewReader(b)
+		req.Body = b
+		req.Header["Content-Type"] = "application/json"
 	}
-	method := rq.method
-	if method == "" {
-		method = http.MethodGet
+	c.headers(req.Header)
+	rsp, err := c.tr.RoundTrip(ctx, req)
+	if errors.Is(err, ErrBodyTooLarge) {
+		return nil, fmt.Errorf("%w: %s: response over %d bytes", remote.ErrTooLarge, rq.op, req.Limit)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %s: %v", remote.ErrNotConfigured, rq.op, err)
-	}
-	if rq.body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	c.headers(req)
-	setFetchOptions(req)
-	rsp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s: %s", remote.ErrTransport, rq.op, c.redact(err.Error()))
 	}
-	defer rsp.Body.Close()
-	limit := rq.limit
-	if limit <= 0 {
-		limit = c.maxRsp
+	if int64(len(rsp.Body)) > req.Limit {
+		// a Transport that did not bound the body is bounded here
+		return nil, fmt.Errorf("%w: %s: response over %d bytes", remote.ErrTooLarge, rq.op, req.Limit)
 	}
-	data, err := io.ReadAll(io.LimitReader(rsp.Body, limit+1))
-	if err != nil {
-		return nil, fmt.Errorf("%w: %s: %s", remote.ErrTransport, rq.op, c.redact(err.Error()))
+	if rsp.Status < 200 || rsp.Status > 299 {
+		return nil, c.statusError(rq.op, rsp)
 	}
-	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("%w: %s: response over %d bytes", remote.ErrTooLarge, rq.op, limit)
-	}
-	if rsp.StatusCode < 200 || rsp.StatusCode > 299 {
-		return nil, c.statusError(rq.op, rsp, data)
-	}
-	return &response{status: rsp.StatusCode, header: rsp.Header, body: data}, nil
+	return &response{status: rsp.Status, header: rsp.Header, body: rsp.Body}, nil
 }
 
-func (c *client) headers(req *http.Request) {
+func (c *client) headers(h map[string]string) {
 	switch c.kind {
 	case GitHub:
-		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+		h["Accept"] = "application/vnd.github+json"
+		h["X-GitHub-Api-Version"] = "2022-11-28"
 	default:
-		req.Header.Set("Accept", "application/json")
+		h["Accept"] = "application/json"
 	}
 	if c.token.IsZero() {
 		return
 	}
 	switch c.kind {
 	case Gitea:
-		req.Header.Set("Authorization", "token "+c.token.Reveal())
+		h["Authorization"] = "token " + c.token.Reveal()
 	default:
-		req.Header.Set("Authorization", "Bearer "+c.token.Reveal())
+		h["Authorization"] = "Bearer " + c.token.Reveal()
 	}
 }
 
@@ -283,37 +272,37 @@ func (c *client) redact(s string) string { return secret.Redact(s, c.token) }
 
 // statusError classifies a non-2xx response. Only the server's "message" field
 // is kept, truncated and redacted; the raw body is not.
-func (c *client) statusError(op string, rsp *http.Response, body []byte) error {
+func (c *client) statusError(op string, rsp *Response) error {
 	var m struct {
 		Message any `json:"message"`
 		Error   any `json:"error"`
 	}
-	_ = json.Unmarshal(body, &m)
-	detail := fmt.Sprint(firstNonNil(m.Message, m.Error, http.StatusText(rsp.StatusCode)))
+	_ = json.Unmarshal(rsp.Body, &m)
+	detail := fmt.Sprint(firstNonNil(m.Message, m.Error, statusText(rsp.Status)))
 	if len(detail) > 300 {
 		detail = detail[:300] + "…"
 	}
 	detail = c.redact(detail)
 	class := remote.ErrTransport
-	switch rsp.StatusCode {
-	case http.StatusUnauthorized:
+	switch rsp.Status {
+	case 401:
 		class = remote.ErrAuth
-	case http.StatusForbidden, http.StatusTooManyRequests:
+	case 403, 429:
 		class = remote.ErrForbidden
-		if rsp.StatusCode == http.StatusTooManyRequests || rsp.Header.Get("X-RateLimit-Remaining") == "0" {
+		if rsp.Status == 429 || rsp.Get("X-RateLimit-Remaining") == "0" {
 			class = remote.ErrRateLimited
 		}
-	case http.StatusNotFound:
+	case 404:
 		class = remote.ErrNotFound
-	case http.StatusConflict, http.StatusUnprocessableEntity, http.StatusBadRequest:
+	case 400, 409, 422:
 		class = remote.ErrConflict
-	case http.StatusRequestEntityTooLarge:
+	case 413:
 		class = remote.ErrTooLarge
 	}
-	if rsp.StatusCode >= 300 && rsp.StatusCode < 400 {
+	if rsp.Status >= 300 && rsp.Status < 400 {
 		detail = "redirect refused"
 	}
-	return &apiError{class: class, status: rsp.StatusCode, op: op, detail: detail}
+	return &apiError{class: class, status: rsp.Status, op: op, detail: detail}
 }
 
 func firstNonNil(vs ...any) any {

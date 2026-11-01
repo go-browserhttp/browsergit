@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strconv"
 
@@ -107,7 +106,7 @@ func (g *gitlab) list(ctx context.Context, repo, commit, dir string) ([]entry, e
 		}
 		// The page NUMBER, never the Link URL: a URL from the server would be
 		// requested with the token, wherever it pointed.
-		next := rsp.header.Get("X-Next-Page")
+		next := rsp.get("X-Next-Page")
 		if next != "" {
 			if v, err := strconv.Atoi(next); err != nil || v <= n+1 {
 				return nil, fmt.Errorf("%w: X-Next-Page %q", remote.ErrBadResponse, next)
@@ -228,7 +227,7 @@ func (g *gitlab) Propose(ctx context.Context, base remote.Base, files remote.Fil
 	var commit struct {
 		ID string `json:"id"`
 	}
-	if _, err := g.c.getJSON(ctx, request{op: "create commit", method: http.MethodPost, path: g.project(base.Repo) + "/repository/commits", body: body}, &commit); err != nil {
+	if _, err := g.c.getJSON(ctx, request{op: "create commit", method: methodPost, path: g.project(base.Repo) + "/repository/commits", body: body}, &commit); err != nil {
 		return remote.Result{}, err
 	}
 	if !remote.IsCommitID(commit.ID) {
@@ -239,7 +238,7 @@ func (g *gitlab) Propose(ctx context.Context, base remote.Base, files remote.Fil
 		WebURL string `json:"web_url"`
 	}
 	mrBody := map[string]any{"source_branch": p.Branch, "target_branch": base.Ref, "title": p.Title, "description": p.Body}
-	if _, err := g.c.getJSON(ctx, request{op: "create merge request", method: http.MethodPost, path: g.project(base.Repo) + "/merge_requests", body: mrBody}, &mr); err != nil {
+	if _, err := g.c.getJSON(ctx, request{op: "create merge request", method: methodPost, path: g.project(base.Repo) + "/merge_requests", body: mrBody}, &mr); err != nil {
 		return res, fmt.Errorf("branch %s was pushed but the merge request failed: %w", p.Branch, err)
 	}
 	if res.URL, err = g.c.checkWebURL(mr.WebURL); err != nil {
