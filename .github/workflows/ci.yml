@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # govulncheck daily: a check that runs only on push cannot see an advisory
+    # published against a dependency nobody touched.
+    - cron: "17 5 * * *"
+
+env:
+  GOWORK: "off"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The race detector needs cgo at test time; the library itself stays
+    # CGO-free, which the cross-build job proves with CGO_ENABLED=0.
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.3"
+      - name: Gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "gofmt needs to be run on:"
+            echo "$out"
+            exit 1
+          fi
+      - name: Vet (native)
+        run: CGO_ENABLED=0 go vet ./...
+      - name: Vet (js/wasm, test files included)
+        run: GOOS=js GOARCH=wasm go vet ./...
+      - name: Test with coverage (race)
+        run: go test -race -covermode=atomic -coverpkg=./... -coverprofile=cover.out ./...
+      - name: Enforce coverage floor (90%)
+        run: |
+          go tool cover -func=cover.out | tail -1
+          pct=$(go tool cover -func=cover.out | awk '/^total:/{print $3}' | tr -d '%')
+          awk -v p="$pct" 'BEGIN{exit (p+0<90.0)?1:0}'
+
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - ./secret FuzzRedact
+          - ./remote FuzzCheckPath
+          - ./remote FuzzCheckBranch
+          - ./remote FuzzBranchName
+          - ./forge FuzzParseTrees
+          - ./forge FuzzDecodeBase64Blob
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.3"
+      - name: Fuzz ${{ matrix.target }}
+        run: |
+          set -- ${{ matrix.target }}
+          go test -run '^$' -fuzz "^$2\$" -fuzztime 30s "$1"
+
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.3"
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: govulncheck (js/wasm)
+        run: GOOS=js GOARCH=wasm go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  cross-build:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - linux/amd64
+          - linux/arm64
+          - linux/riscv64
+          - linux/ppc64le
+          - linux/s390x
+          - linux/loong64
+          - linux/386
+          - darwin/arm64
+          - windows/amd64
+          - js/wasm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.3"
+      - name: Build ${{ matrix.target }}
+        run: |
+          export GOOS=$(echo "${{ matrix.target }}" | cut -d/ -f1)
+          export GOARCH=$(echo "${{ matrix.target }}" | cut -d/ -f2)
+          go build ./...

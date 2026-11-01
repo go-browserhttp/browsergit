@@ -100,7 +100,9 @@ func TestEncodersRefuse(t *testing.T) {
 		t.Fatal("gob wrote the value before failing")
 	}
 	// A struct that does not carry the token in a serialized field is fine.
-	if _, err := json.Marshal(struct{ T Token `json:"-"` }{tok}); err != nil {
+	if _, err := json.Marshal(struct {
+		T Token `json:"-"`
+	}{tok}); err != nil {
 		t.Fatalf("json:\"-\" must stay serializable: %v", err)
 	}
 }
