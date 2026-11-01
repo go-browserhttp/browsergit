@@ -3,7 +3,7 @@
 
 //go:build !js
 
-package remote
+package smarthttp
 
 import (
 	"context"
@@ -13,8 +13,14 @@ import (
 	"testing"
 
 	"github.com/go-browserhttp/browsergit/internal/gittest"
+	. "github.com/go-browserhttp/browsergit/remote"
 	"github.com/go-browserhttp/browsergit/secret"
 )
+
+// the names the test was written with, before the package moved
+type GitConfig = Config
+
+var NewGit = New
 
 const placeholder = "SMART-HTTP-TOKEN-PLACEHOLDER"
 
