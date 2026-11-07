@@ -24,6 +24,7 @@ theirs, head, _ := r.Refresh(ctx, base)                              // nil when
 | `remote` | The `Remote` interface (`Load`, `Propose`, `Refresh`), `Base`, path/branch/repository validation, size limits. Links neither go-git nor net/http. |
 | `smarthttp` | `Git`, a `Remote` over git smart HTTP (go-git). A package of its own, so that a REST-only page does not carry go-git (about 13 MB of wasm). |
 | `forge` | `Remote` over the REST APIs of **GitHub**, **GitLab** and **Gitea/Forgejo**. |
+| `oauth` | OAuth 2.0 authorization code + PKCE for a public client (GitLab, Gitea, Forgejo): a fresh state and S256 verifier per attempt, the exact redirect URI checked on callback, refresh with rotation, revocation that always forgets (RFC 7636, RFC 9700). |
 | `secret` | `Token`: a credential that prints as `[redacted]` and refuses every encoder. |
 | `browsergit` (root) | go-git v5 in memory (memfs), smart HTTP over the browser's Fetch: clone, status, commit, pull, push, snapshot. Moved here from go-tex's `playground/internal/browsergit`, history kept. |
 | `gitrpc` | The JSON protocol between a page and a git web worker. Moved from go-tex, history kept. |

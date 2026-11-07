@@ -18,6 +18,9 @@ type Transport interface {
 	RoundTrip(ctx context.Context, req *Request) (*Response, error)
 }
 
+// DefaultTransport is net/http natively and the Fetch API in the browser.
+func DefaultTransport() Transport { return defaultTransport() }
+
 // Request is one API call as the transport sees it.
 type Request struct {
 	Method string
