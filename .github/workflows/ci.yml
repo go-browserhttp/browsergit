@@ -59,6 +59,7 @@ jobs:
           - ./remote FuzzBranchName
           - ./forge FuzzParseTrees
           - ./forge FuzzDecodeBase64Blob
+          - ./oauth FuzzParseToken
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
