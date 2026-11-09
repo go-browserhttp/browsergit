@@ -60,6 +60,8 @@ jobs:
           - ./forge FuzzParseTrees
           - ./forge FuzzDecodeBase64Blob
           - ./oauth FuzzParseToken
+          - ./gitd FuzzParseSession
+          - ./gitd FuzzDecodeLoad
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
