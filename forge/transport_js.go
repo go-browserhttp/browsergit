@@ -17,7 +17,9 @@ import (
 //   - redirect "error": a redirect is never followed, so the request and its
 //     Authorization header cannot be steered to another host;
 //   - credentials "omit": no cookie of the forge rides along, so a call can
-//     act only with the token, never with the person's forge session;
+//     act only with the token, never with the person's forge session (except
+//     for a Request that sets SameOrigin: package gitd's calls to the page's own
+//     origin, which carry that origin's session cookie and no other);
 //   - cache "no-store" and referrerPolicy "no-referrer";
 //   - the body is read chunk by chunk and abandoned past the limit.
 type FetchTransport struct{}
@@ -75,6 +77,9 @@ func (FetchTransport) RoundTrip(ctx context.Context, r *Request) (out *Response,
 		"cache":          "no-store",
 		"referrerPolicy": "no-referrer",
 		"signal":         ac.Get("signal"),
+	}
+	if r.SameOrigin {
+		opts["mode"], opts["credentials"], opts["referrerPolicy"] = "same-origin", "same-origin", "same-origin"
 	}
 	if r.Body != nil {
 		b := g.Get("Uint8Array").New(len(r.Body))

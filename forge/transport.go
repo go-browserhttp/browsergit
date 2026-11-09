@@ -29,6 +29,14 @@ type Request struct {
 	Body   []byte
 	// Limit is the most body bytes to read; a longer body is ErrBodyTooLarge.
 	Limit int64
+	// SameOrigin sends the page's own cookies and nothing else: the browser's
+	// Fetch is called with mode "same-origin" (a URL on another origin is
+	// refused by the browser itself), credentials "same-origin" and referrer
+	// policy "same-origin" (with "no-referrer" the browser would send
+	// "Origin: null" on a POST). The default, false, is credentials "omit". Only
+	// package gitd sets it; natively it changes nothing (the Client's cookie jar
+	// decides).
+	SameOrigin bool
 }
 
 // Response is the status, the headers (names in lower case) and the body.
